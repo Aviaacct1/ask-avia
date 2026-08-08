@@ -107,7 +107,17 @@ def check_modules() -> None:
         except Exception as exc:  # noqa: BLE001 - the reason must reach the operator
             record("FAIL", f"import {name}", f"{why}. {type(exc).__name__}: {exc}")
             continue
-        record("PASS", f"import {name}", getattr(mod, "__version__", "version unknown"))
+        # Some packages expose no __version__ (mcp is one), and "version unknown" for
+        # the protocol library is exactly the thing a provisioning record must not say.
+        version = getattr(mod, "__version__", None)
+        if not version:
+            try:
+                from importlib.metadata import version as dist_version
+
+                version = dist_version(name)
+            except Exception:  # noqa: BLE001 - reported below, never hidden
+                version = "version not reported by package or distribution metadata"
+        record("PASS", f"import {name}", str(version))
 
 
 # ---------------------------------------------------------------------------------
