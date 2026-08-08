@@ -1,0 +1,84 @@
+# ask-avia - .gitignore
+# Written BEFORE git init, per HANDOVER_Tool_To_Git_08Aug2026.md section 4.
+# A 3 July result CSV was swept into Meridian's first commit by `git add -A`,
+# travelled to the workstation in the clone, and a watcher released early on the
+# stale file. Nothing that a run produces, and nothing that carries a secret,
+# belongs in this repository.
+
+# --- secrets. Nothing here is ever committed. ---
+.env
+.env.*
+!.env.example
+*secret*
+*credential*
+*credentials*
+access_password.txt
+*.pem
+*.key
+*.pfx
+token.txt
+egnyte_token*
+auth_token*
+
+# --- data. The store lives on the workstation under AVIA_LOCAL_CACHE. ---
+*.duckdb
+*.duckdb.wal
+*.parquet
+*.joblib
+store_parts/
+proof/
+pilot/
+data/
+_dt_cache/
+duckdb_tmp/
+
+# --- run output. Deterministic code produces these; they are never inputs. ---
+out/
+output/
+outputs/
+staging/
+_staging/
+run_logs/
+audit/
+*.log
+fact_of_day_cache.json
+
+# Generated deliverables. build_workbook writes these at run time.
+*.xlsx
+*.xlsm
+*.pptx
+*.docx
+*.pdf
+# ...but the workbook template and pinned test fixtures are tracked.
+!tests/fixtures/**/*.xlsx
+!templates/**/*.xlsx
+
+# --- machine-local config ---
+avia_config.json
+local_config.json
+*.local.yaml
+*.local.yml
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+venv/
+.venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- editors and OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+~$*

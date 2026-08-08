@@ -1,0 +1,14 @@
+# ask-avia runtime dependencies.
+#
+# Install ONLY what this host runs. Meridian's requirements.txt listed streamlit for a
+# legacy tool the workstation does not run, and pip resolved starlette DOWN from 1.6.0
+# to 1.3.1 to satisfy it; starlette is what the live portal server runs on. A tool
+# nobody was using changed a dependency of the tool in use, in a resolver step nobody
+# reads. Anything legacy goes in its own file, never here.
+#
+# One virtual environment for this tool. The workstation runs four.
+
+duckdb>=1.1
+openpyxl>=3.1
+mcp>=1.2
+httpx>=0.27

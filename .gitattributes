@@ -1,0 +1,25 @@
+# ask-avia line endings.
+#
+# Editing happens on the Dev PC (Windows), running happens on the workstation, and
+# Tool Standard point 5 puts this in a Linux container unchanged. Normalise to LF in
+# the repository so a checkout on Linux does not carry CRLF into shell scripts, where
+# it fails with an error message that names the wrong thing.
+
+* text=auto eol=lf
+
+# Windows-only files keep CRLF on checkout.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary. Never normalise, never diff as text.
+*.duckdb binary
+*.parquet binary
+*.xlsx binary
+*.xlsm binary
+*.pptx binary
+*.docx binary
+*.pdf binary
+*.png binary
+*.jpg binary
+*.ico binary
