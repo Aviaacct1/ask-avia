@@ -1,0 +1,47 @@
+# ask-avia column alias table.
+#
+# A DATA FILE, not code. The extraction pipeline's own alias tables are data files for
+# the same reason: the vocabulary moves and the code should not have to.
+#
+# Maps the CONCEPTS the seven tools need onto whatever column names the bound store
+# actually carries. The proof stores, the pilot store and the rebuilt 25-year store may
+# each name the same concept differently; the tools must not care.
+#
+# Rules:
+#   - A concept marked required=yes with no matching column is a hard failure at bind
+#     time, naming the store, the table and the concept. Nothing is defaulted.
+#   - Aliases are tried in the order listed. First match wins, so put the canonical
+#     name first.
+#   - Matching is case-insensitive on the column name.
+#   - Add a row rather than editing code when the store gains a column.
+#
+# concept	required	aliases (comma separated, in priority order)
+
+value	yes	value,val,amount,figure
+year	yes	year,yr,period_year,calendar_year
+metric_code	yes	metric_code,metric,code,metric_id
+entity	yes	entity,entity_id,iata,iata_code,airport,airport_code,entity_code
+unit	yes	unit,units,uom
+# The mandatory source. Ingestion schema v1.1, T1: "source: named source string,
+# mandatory (file, benchmark query id, engine pack id, or 'manual JC 16Jul2026')".
+# It is a NAMED SOURCE, not necessarily a file path, which is why the bare column
+# `source` satisfies it. egnyte_path below carries the locator when the store has one.
+source	yes	source_file,source_path,source_document,document,file_path,file,src_file,source
+
+entity_type	no	entity_type,entity_class,type
+segment	no	segment,seg,category,dimension
+currency	no	currency,ccy,curr
+basis	no	basis,price_basis,real_nominal
+temporality	no	temporality,actual_forecast,af,time_basis
+vantage_year	no	vantage_year,vantage,as_at_year
+project_id	no	project_id,project,engagement,engagement_id,job_id
+project_name	no	project_name,project_title,engagement_name
+egnyte_path	no	egnyte_path,egnyte_location,location,shared_path,repo_path
+record_id	no	record_id,id,point_id,row_id,uid,atom_id
+source_type_flag	no	source_type_flag,confidentiality,source_type,sensitivity
+inferred_fields	no	inferred_fields,inferred,derived_fields
+verification_status	no	verification_status,verified,status,verification
+data_class	no	data_class,class,point_class,kind
+qualifiers	no	qualifiers,quals,notes,context
+page	no	page,page_no,page_number,sheet,tab
+extract_text	no	extract_text,verbatim,snippet,context_text,raw_text
