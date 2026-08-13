@@ -17,7 +17,7 @@
 #
 # concept	required	aliases (comma separated, in priority order)
 
-value	yes	value,val,amount,figure
+value	yes	value,value_num,val,amount,figure,value_text
 year	yes	year,yr,period_year,calendar_year
 metric_code	yes	metric_code,metric,code,metric_id
 entity	yes	entity,entity_id,iata,iata_code,airport,airport_code,entity_code
@@ -36,12 +36,20 @@ temporality	no	temporality,actual_forecast,af,time_basis
 vantage_year	no	vantage_year,vantage,as_at_year
 project_id	no	project_id,project,engagement,engagement_id,job_id
 project_name	no	project_name,project_title,engagement_name
-egnyte_path	no	egnyte_path,egnyte_location,location,shared_path,repo_path
+# NOTE: the extraction store's `location` column is the IN-FILE cell locator
+# (sheet!cell), NOT a folder path, so it must not bind here. The Egnyte folder path
+# is carried by `source` (source_file holds "/Shared/..."). get_source uses source for
+# the path and selects the raw `location` column for the cell.
+egnyte_path	no	egnyte_path,egnyte_location,shared_path,repo_path
 record_id	no	record_id,id,point_id,row_id,uid,atom_id
 source_type_flag	no	source_type_flag,confidentiality,source_type,sensitivity
 inferred_fields	no	inferred_fields,inferred,derived_fields
-verification_status	no	verification_status,verified,status,verification
+# review_status is the closest signal the store carries (REVIEW_STATES: auto, queued,
+# accepted, corrected, rejected). Mapping it to verification_status is PROVISIONAL and
+# owned by JC: "auto" means not human-verified, so a tool must present the state, not
+# claim "verified". A dedicated verification_status field remains a pipeline decision.
+verification_status	no	verification_status,review_status,verified,status,verification
 data_class	no	data_class,class,point_class,kind
 qualifiers	no	qualifiers,quals,notes,context
 page	no	page,page_no,page_number,sheet,tab
-extract_text	no	extract_text,verbatim,snippet,context_text,raw_text
+extract_text	no	extract_text,verbatim,snippet,context_text,raw_text,context
