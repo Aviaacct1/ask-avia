@@ -21,6 +21,9 @@ value	yes	value,value_num,val,amount,figure,value_text
 year	yes	year,yr,period_year,calendar_year
 metric_code	yes	metric_code,metric,code,metric_id
 entity	yes	entity,entity_id,iata,iata_code,airport,airport_code,entity_code
+# the code form of the entity (IATA), kept as its own concept so a search by "NCL" and a
+# search by "Newcastle" both hit. entity (above) prefers the human name where present.
+entity_id	no	entity_id,iata,iata_code,airport_code,entity_code
 unit	yes	unit,units,uom
 # The mandatory source. Ingestion schema v1.1, T1: "source: named source string,
 # mandatory (file, benchmark query id, engine pack id, or 'manual JC 16Jul2026')".
@@ -52,4 +55,7 @@ verification_status	no	verification_status,review_status,verified,status,verific
 data_class	no	data_class,class,point_class,kind
 qualifiers	no	qualifiers,quals,notes,context
 page	no	page,page_no,page_number,sheet,tab
+# the in-file cell/sheet locator (extraction store's `location`); get_source uses it to
+# pinpoint where in the document the figure sits, alongside the Egnyte path from `source`.
+cell	no	location,cell,cell_ref,coordinates
 extract_text	no	extract_text,verbatim,snippet,context_text,raw_text,context
