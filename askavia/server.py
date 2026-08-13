@@ -143,7 +143,15 @@ def build_app(conf: "cfg.Config", store: "st.Store", audit: "AuditLog"):
 def main() -> None:
     import uvicorn
 
-    conf = cfg.load(require_secrets=True)     # raises if the bearer token is unset
+    # Require the bearer token (fail closed on auth) but NOT the Egnyte token: the three
+    # built tools cite the stored source path and make no Egnyte call. Egnyte becomes
+    # required when file_to_project is built.
+    conf = cfg.load(require_secrets=False)
+    if not conf.auth_token:
+        raise cfg.ConfigError(
+            f"{cfg.ENV_AUTH_TOKEN} is not set. The service fails closed and will not "
+            f"serve without its bearer token."
+        )
     print("ask-avia config:", conf.redacted())
     store = st.Store(conf)
     bound = store.bind()
