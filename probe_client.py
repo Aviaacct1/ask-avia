@@ -47,6 +47,23 @@ async def main() -> int:
     headers = {"Authorization": f"Bearer {TOKEN}"} if TOKEN else {}
     # trust_env=False so a machine's proxy settings do not hijack a localhost call.
     http_client = _httpx.AsyncClient(headers=headers, trust_env=False, timeout=60)
+
+    # Cheap preflight with a clear message, so an auth or not-running problem does not
+    # surface as an anyio TaskGroup traceback from the MCP handshake.
+    base = URL.rsplit("/", 1)[0]
+    try:
+        h = await http_client.get(f"{base}/health")
+    except Exception as exc:
+        print(f"cannot reach {base}/health: {type(exc).__name__}: {exc}\n"
+              f"Is the server running? Start it with:  python -m askavia.server")
+        return 2
+    print("server:", h.json().get("store", "?"))
+    probe = await http_client.post(URL, json={"jsonrpc": "2.0", "id": 0, "method": "ping"})
+    if probe.status_code == 401:
+        print("401 unauthorised: the bearer token does not match the server's "
+              "ASKAVIA_AUTH_TOKEN. Use the SAME string in both places.")
+        return 1
+
     async with http_client:
         async with streamable_http_client(URL, http_client=http_client) as streams:
             read, write = streams[0], streams[1]
