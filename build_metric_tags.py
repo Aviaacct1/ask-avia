@@ -296,17 +296,30 @@ kinded AS (
          {band_sql(1)} AS band_hi,
          {FAMILY_SQL} AS family
   FROM resolved
+),
+coded AS (
+  SELECT *, {CODE_SQL} AS metric_code_v2 FROM kinded
 )
 SELECT context, sheet, row_label, measure_noun, label_source, measure_kind,
        family AS metric_family,
-       {CODE_SQL}      AS metric_code_v2,
+       metric_code_v2,
        {CURRENCY_SQL}  AS currency_v2,
        {SCALE_SQL}     AS scale_mult,
        {BASIS_SQL}     AS price_basis,
        {BASE_YEAR_SQL} AS base_year,
        {PCT_SQL}       AS unit_is_pct,
-       rule_id, band_lo, band_hi
-FROM kinded"""
+       rule_id,
+       -- The floor depends on the CODE, not the kind. Aeronautical revenue per
+       -- passenger and a passenger count are never negative, so a negative one
+       -- is a variance or growth row still wearing a rate code. EBITDA per pax
+       -- legitimately goes negative and keeps its original floor.
+       CASE WHEN metric_code_v2 IN ('rev_aero_per_pax', 'rev_nonaero_per_pax',
+                                    'rev_total_per_pax', 'pax_total', 'pax_segment')
+            THEN greatest(coalesce(band_lo, 0.0), 0.0)
+            ELSE band_lo
+       END AS band_lo,
+       band_hi
+FROM coded"""
 
 
 VIEW_SQL = """

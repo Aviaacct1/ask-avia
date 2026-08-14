@@ -189,10 +189,16 @@ def test_an_out_of_band_rate_loses_its_code_in_the_view(tmp_path):
           value_scale VARCHAR, location VARCHAR, context VARCHAR, year INTEGER)
     """)
     ctx = "[Nominal] Yield Aero Revenue || [%] Newcastle Airport"
+    ebitda_ctx = "[£, Nominal] EBITDA per Pax EBITDA Summary || [£] Newcastle Airport"
     con.executemany(
         "INSERT INTO ask_points VALUES (?,?,'rev_aero','NCL','','/a.xls','pr','','',"
         "'actual','','','sheet=Aero Revenue!C6',?,2009)",
-        [("plausible", 5.17, ctx), ("leaked", 71412.37, ctx)],
+        [("plausible", 5.17, ctx), ("leaked", 71412.37, ctx), ("negative", -461.7, ctx)],
+    )
+    con.execute(
+        "INSERT INTO ask_points VALUES ('loss',-1.85,'ebitda','NCL','per pax','/a.xls',"
+        "'pr','','','actual','','','sheet=EBITDA Summary!D9',?,2009)",
+        [ebitda_ctx],
     )
     con.execute("CREATE TABLE context_tag AS " + B.classified_sql("TRUE"))
     con.execute(B.VIEW_SQL)
@@ -204,6 +210,12 @@ def test_an_out_of_band_rate_loses_its_code_in_the_view(tmp_path):
     )
     assert got["plausible"] == "rev_aero_per_pax"
     assert got["leaked"] is None
+    # Aeronautical revenue per passenger is never negative: that is a variance
+    # row wearing a rate code.
+    assert got["negative"] is None
+    # ... but a loss-making airport really does earn negative EBITDA per pax,
+    # so the floor follows the code, not the kind.
+    assert got["loss"] == "ebitda_per_pax"
 
     # and the rule's own claim survives for audit, so the veto is visible
     raw = dict(
