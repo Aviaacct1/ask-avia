@@ -38,6 +38,31 @@ CALLER = os.environ.get("ASKAVIA_USER", "").strip() or "ask-avia-connector"
 # The query-parameter name accepted as an alternative to the Authorization header.
 TOKEN_QUERY_PARAM = "token"
 
+# The paths an MCP client probes to discover an OAuth authorisation server. ask-avia has
+# none: it authenticates with a static token and nothing else.
+#
+# Answering these with 401 is what breaks connector registration. A 401 tells the client
+# "there is a sign-in service at this origin, go and register with it", so the client
+# attempts dynamic client registration, finds nothing, and reports "Couldn't register with
+# ask-avia's sign-in service" even though the MCP session itself connected fine. A 404 says
+# there is no authorisation server here, and the client then uses the credential it already
+# holds.
+#
+# These paths carry no data and are answered before the auth check, so a 404 discloses only
+# the absence of an OAuth server, which the failed probe already reveals.
+NO_AUTH_SERVER_PATHS = (
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/openid-configuration",
+    "/register",
+)
+
+
+def _is_auth_server_probe(path: str) -> bool:
+    """True for an OAuth discovery path. Matches sub-paths too: the client probes both
+    /.well-known/oauth-protected-resource and /.well-known/oauth-protected-resource/mcp."""
+    return any(path == p or path.startswith(p + "/") for p in NO_AUTH_SERVER_PATHS)
+
 
 def build_server(store: "st.Store", audit: "AuditLog"):
     """Construct the MCPServer and register the built tools. Kept separate from serving so
@@ -142,6 +167,12 @@ def _bearer_middleware(expected_token: str):
         async def dispatch(self, request, call_next):
             if request.url.path == "/health":
                 return await call_next(request)
+            if _is_auth_server_probe(request.url.path):
+                return JSONResponse(
+                    {"error": "not_found",
+                     "detail": "ask-avia has no OAuth authorisation server."},
+                    status_code=404,
+                )
             if not expected_token:
                 return _refuse()
             presented = _presented_token(request)
