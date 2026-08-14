@@ -238,7 +238,7 @@ def canonical_clause(con: duckdb.DuckDBPyConnection, alias: str = "") -> str:
     return f" AND {col} IN (SELECT source_file FROM doc_canonical WHERE is_canonical)"
 
 
-def classified_sql(where: str) -> str:
+def classified_sql(where: str, source: str = "ask_points") -> str:
     """One distinct row per (context, sheet): classification depends only on
     those, so the map stays small against 722m points."""
     return f"""
@@ -251,7 +251,7 @@ WITH base AS (
          lower(regexp_extract(context, '^\\s*\\[([^\\]]*)\\]', 1)) AS cue,
          lower(split_part(context, '||', 2))                      AS tail,
          lower(coalesce(unit, ''))                                AS unit_l
-  FROM ask_points
+  FROM {source}
   WHERE {where}
 ),
 lab AS (
@@ -372,15 +372,42 @@ def main() -> int:
         say(f"context_tag written: {n:,} distinct (context, sheet) rows")
         con.execute(VIEW_SQL)
         say("view ask_points_v2 created")
-        src = "context_tag"
+        points, tagsrc, pwhere = "ask_points", "context_tag", where_p
+    elif args.all:
+        # Store-wide: materialise only the tag map, which is small. The scope
+        # itself is 722m points and must not be copied into a temp table.
+        say("classifying every distinct context, one pass over the store ...")
+        con.execute(
+            "CREATE OR REPLACE TEMP TABLE ctag AS " + classified_sql(where)
+        )
+        n_ctx = con.execute("SELECT count(*) FROM ctag").fetchone()[0]
+        say(f"  distinct (context, sheet) : {n_ctx:,}")
+        say()
+        points, tagsrc, pwhere = "ask_points", "ctag", where_p
     else:
-        con.execute("CREATE OR REPLACE TEMP VIEW ctag AS " + classified_sql(where))
-        src = "ctag"
+        # MATERIALISE, do not view. As a temp view the classification is
+        # recomputed and the store re-scanned on every report query below: six
+        # passes over 84GB to answer six questions. One pass each instead.
+        say("materialising the scope, one pass over the store ...")
+        con.execute(
+            "CREATE OR REPLACE TEMP TABLE pts AS SELECT point_id, value_num, "
+            "metric_code, entity_id, unit, source_file, location, context, year "
+            f"FROM ask_points WHERE {where}"
+        )
+        n_pts = con.execute("SELECT count(*) FROM pts").fetchone()[0]
+        say(f"  scope materialised : {n_pts:,} points")
+        con.execute(
+            "CREATE OR REPLACE TEMP TABLE ctag AS " + classified_sql("TRUE", "pts")
+        )
+        n_ctx = con.execute("SELECT count(*) FROM ctag").fetchone()[0]
+        say(f"  distinct (context, sheet) : {n_ctx:,}")
+        say()
+        points, tagsrc, pwhere = "pts", "ctag", "TRUE"
 
     join = (
-        f"FROM ask_points p JOIN {src} t ON p.context = t.context "
+        f"FROM {points} p JOIN {tagsrc} t ON p.context = t.context "
         "AND regexp_extract(p.location, 'sheet=(.*)!', 1) = t.sheet "
-        f"WHERE {where_p}"
+        f"WHERE {pwhere}"
     )
 
     say("what the rules claim, by point count")
