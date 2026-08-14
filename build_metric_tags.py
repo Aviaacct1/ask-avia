@@ -7,8 +7,8 @@ harvest_manifest and doc_canonical.
 WHY. metric_code was assigned from the sheet or section header, not the row
 label. On a sheet called "Aero Revenue", every row on it took metric_code
 rev_aero: passenger counts, CPI, GDP, yields, segment splits and the total
-alike. At Newcastle the largest single group inside rev_aero (9,764 points,
-unit '000, values 272-4,906) is the passenger count.
+alike. Measured at Newcastle: under half the points labelled rev_aero are a
+level of aero revenue.
 
 THE PARSE IS EXACT, NOT A GUESS. context is structured:
 
@@ -18,15 +18,23 @@ and the sheet name is held separately in `location` (sheet=NAME!CELL), so
 stripping the known sheet name off the tail of the label recovers the true row
 label. "Passengers Aero Revenue" on sheet "Aero Revenue" -> "Passengers".
 
-TWO INDEPENDENT FIELDS come out of it, and both are needed:
-  measure_kind   what type of number it is (level, rate, growth, index, ...)
-  metric_code_v2 which measure it is, NULL wherever the point must never
-                 answer a money question, so filtering on it is safe by
-                 construction rather than by the caller remembering to.
+THREE FIELDS come out of it, and the separation between them is the point:
 
-The rule table below is the single definition. It generates the SQL for the
-dry run and for the build, so what is inspected and what is written cannot
-diverge.
+  measure_noun   WHAT is being measured (revenue, ebitda, opex, pax, macro).
+                 Taken from the ROW LABEL first. This is what stops the mirror
+                 image of the original defect: an EBITDA row on an aero sheet
+                 must stay EBITDA, not become aero revenue.
+  measure_kind   WHAT TYPE of number it is (level, component, rate, growth,
+                 index, share, volume).
+  metric_code_v2 the code that may answer a question, NULL wherever the point
+                 must not, so filtering on it is safe by construction rather
+                 than by the caller remembering to.
+
+SHEET FALLBACK, deliberately narrow. Wide traffic tables label rows with a
+dimension ("asia 1999-q2") and carry the measure in the header. The sheet may
+supply the noun ONLY where the row label names none and the sheet names exactly
+one, and label_source records that it did, so a tag that leaned on the sheet can
+always be excluded or scored separately.
 
 Run on the WORKSTATION (Donatello).
 
@@ -54,97 +62,89 @@ DEFAULT_STORE = os.environ.get(
 )
 
 # --------------------------------------------------------------------------
-# The rule table. Ordered, first match wins. Patterns are RE2 (DuckDB), so no
-# lookarounds: negation is done by ordering, not by lookbehind. Matched against
-# the lower-cased row label unless the rule names another target.
+# WHAT is being measured. Ordered, first match wins, applied to the row label.
+# Patterns are RE2 (DuckDB): no lookarounds, so negation is done by ordering.
 #
-#   rule_id, measure_kind, target, pattern, expected value band
-#
-# The band is carried into the table so the view can flag a point whose
-# magnitude contradicts its class, rather than silently trusting the text.
+# Order matters twice over:
+#   - ebitda / opex / capex before revenue, so "EBITDA" on a revenue sheet
+#     stays EBITDA;
+#   - revenue before pax, so "aero rev per pax" is revenue-at-a-rate, not a
+#     passenger count.
+# "cost" is never matched bare: "Low Cost" is a market segment, not opex.
 # --------------------------------------------------------------------------
-RULES = [
-    # Shares and growth first: "YoY Growth Aero Revenue" must never read as revenue.
-    ("R01_share", "share", "label", r"(% share|share of|% of total|mix %)", 0.0, 1.5),
-    (
-        "R02_growth",
-        "growth",
-        "label",
-        r"(yoy|y/y|year on year|year-on-year|cagr|% change|% chg|change in|growth|variance|delta)",
-        -5.0,
-        5.0,
-    ),
-    # Macro drivers and deflators. Guarded by band: an index is a small number.
-    (
-        "R03_index",
-        "index",
-        "label",
-        r"(consumer price index|inflation index|^cpi|^rpi|^gdp|\(cpi|deflat|price index|^index)",
-        -1.0,
-        20.0,
-    ),
-    # Per-unit rates. The unit 'per pax' is decisive where it is present.
-    ("R04_rate_unit", "rate", "unit", r"^(per pax|per passenger|/pax)$", -200.0, 200.0),
-    (
-        "R05_rate_label",
-        "rate",
-        "label",
-        r"(per pax|per pass|per passenger|yield|/pax|per wlu|per atm|per movement|per sqm|rev/pax)",
-        -200.0,
-        200.0,
-    ),
-    # Volumes. Freight and mail are excluded here on purpose: at Newcastle
-    # "Freight / Mail / General Aviation" is a revenue line, not a tonnage.
-    (
-        "R06_volume",
-        "volume",
-        "label",
-        r"^(pax|passengers?|total pax|atms?|air transport movements|movements|wlu|seats)\b",
-        0.0,
-        1e9,
-    ),
-    # Segment components of a total. Summing these with the total double counts.
-    (
-        "R07_component",
-        "component",
-        "label",
-        r"(low cost|lcc|charter|scheduled|full service|domestic|international|^eu\b|non-eu|non eu|british airways|other airlines|transfer|freight|mail|general aviation|car park|parking|duty free|retail|advertising|concession|fuel|handling|hbs|cute|check-in|transactions|rental)",
-        None,
-        None,
-    ),
-    (
-        "R08_total",
-        "level",
-        "label",
-        r"(^total|^sub ?total|^revenues?$|^aero(nautical)? revenues?$|^net revenue|^turnover)",
-        None,
-        None,
-    ),
-    # A bare "Revenue" style label on a revenue sheet, caught after the above.
-    ("R09_level", "level", "label", r"(revenue|income|ebitda|opex|cost)", None, None),
+NOUNS = [
+    ("macro", r"(consumer price index|inflation|deflator|price index|elasticit|^cpi|^rpi|^gdp|\(cpi|\(rpi)"),
+    ("ebitda", r"(ebitda|ebit\b|operating profit|net income|profit before)"),
+    ("opex", r"(opex|operating cost|operating expen|staff cost|payroll|total cost|unit cost|cost base|overhead)"),
+    ("capex", r"(capex|capital expen|capital cost|investment programme)"),
+    ("charge", r"(charge|tariff|landing fee|passenger fee)"),
+    ("revenue", r"(revenue|rev\b|revs\b|income|turnover|yield|fare|receipts|takings)"),
+    ("pax", r"(passengers?|^pax|pax\b|atms?\b|air transport movement|movements?\b|wlu|seats\b|load factor)"),
+    # Last, and only after pax has had its chance: in this corpus a bare "Aero"
+    # or "Non-Aero" naming a line IS a revenue category ("Low Cost" on sheet
+    # "Aero Calc", "Aero per Pax"). Placed here so "Aero Passengers" stays pax.
+    ("revenue", r"(^|\s)(non-?)?aero(\s|$)"),
 ]
 
-# Metric family. Non-aero is tested first, because every non-aero label
-# contains the string "aero".
+# The per-unit denominator is stripped before the noun is read. Otherwise
+# "Aero per Pax" reads as a passenger count, when the pax is the denominator
+# and the subject is revenue.
+DENOM_STRIP = r"(per pax|per passenger|per pass[a-z]*|per wlu|per atm|per fte|per employee|per movement|per sqm|/pax)"
+
+# WHAT TYPE of number. Ordered, first match wins.
+#
+#   rule_id, measure_kind, target, pattern, band_lo, band_hi
+#
+# Bands are corrected from the first dry run: indices are commonly rebased to
+# 100, and growth and share are stated as percentage points as often as as
+# fractions. A band that is too tight manufactures conflicts and hides the real
+# ones, so these are set to catch nonsense only.
+KINDS = [
+    ("R01_share", "share", "label", r"(% share|share of|% of total|mix %|penetration)", -200.0, 200.0),
+    ("R02_growth", "growth", "label", r"(yoy|y/y|year on year|year-on-year|cagr|% change|% chg|change in|growth|variance|delta)", -500.0, 500.0),
+    ("R03_index", "index", "label", r"(consumer price index|inflation index|price index|deflator|^index|index$|elasticit|^cpi|^rpi|^gdp|\(cpi|\(rpi)", -100.0, 100000.0),
+    # A per-unit denominator anywhere makes it a rate, whatever the noun.
+    ("R04_rate_unit", "rate", "unit", r"^(per pax|per passenger|/pax|per wlu|per atm)$", -100000.0, 100000.0),
+    ("R05_rate_label", "rate", "label", r"(per pax|per pass|per passenger|per wlu|per atm|per movement|per fte|per sqm|per employee|/pax|rev/pax|yield|average fare|unit rate)", -100000.0, 100000.0),
+    ("R06_volume", "volume", "label", r"^(pax|passengers?|total pax|atms?|air transport movements|movements|wlu|seats)\b", None, None),
+    ("R07_component", "component", "label", r"(low cost|lcc|charter|scheduled|full service|domestic|international|^eu\b|non-eu|non eu|british airways|other airlines|transfer|freight|mail|general aviation|car park|parking|duty free|retail|advertising|concession|fuel|handling|hbs|cute|check-in|transactions|rental|catering)", None, None),
+    ("R08_total", "level", "label", r"(^total|^sub ?total|^net\b|^gross\b|^reported|^normalised)", None, None),
+    ("R09_level", "level", "noun", r"(revenue|charge|ebitda|opex|capex)", None, None),
+]
+
+# Family. Non-aero is tested first, because every non-aero label contains the
+# string "aero". Only consulted for the revenue and charge nouns.
 FAMILY_SQL = """
 CASE
-  WHEN regexp_matches(fam_text, '(non-aero|non aero|nonaero|retail|car park|duty free|concession)') THEN 'nonaero'
-  WHEN regexp_matches(fam_text, 'aero')                                                             THEN 'aero'
-  WHEN regexp_matches(fam_text, '(passenger|pax|traffic)')                                          THEN 'traffic'
+  WHEN regexp_matches(fam_text, '(non-aero|non aero|nonaero|retail|car park|duty free|concession|commercial revenue)') THEN 'nonaero'
+  WHEN regexp_matches(fam_text, 'aero')                                                                                THEN 'aero'
+  WHEN regexp_matches(fam_text, '(passenger|pax|traffic)')                                                             THEN 'traffic'
   ELSE 'other'
 END"""
 
-# metric_code_v2 is deliberately NULL for growth, share, index and unclassified.
-# A point that cannot answer a money question should not carry a money code.
+# The code that may answer a question. NULL for growth, share, index, for any
+# unplaced point, and for any noun the sheet had to supply ambiguously.
 CODE_SQL = """
 CASE
-  WHEN measure_kind = 'volume'                          THEN 'pax_total'
-  WHEN measure_kind = 'rate'      AND family = 'aero'    THEN 'rev_aero_per_pax'
-  WHEN measure_kind = 'rate'      AND family = 'nonaero' THEN 'rev_nonaero_per_pax'
-  WHEN measure_kind = 'level'     AND family = 'aero'    THEN 'rev_aero'
-  WHEN measure_kind = 'level'     AND family = 'nonaero' THEN 'rev_nonaero'
-  WHEN measure_kind = 'component' AND family = 'aero'    THEN 'rev_aero_segment'
-  WHEN measure_kind = 'component' AND family = 'nonaero' THEN 'rev_nonaero_segment'
+  WHEN measure_kind IN ('growth', 'share', 'index')      THEN NULL
+  WHEN measure_noun = 'macro'                            THEN NULL
+  WHEN label_source = 'none'                             THEN NULL
+  WHEN measure_noun = 'pax' AND measure_kind = 'component'      THEN 'pax_segment'
+  WHEN measure_noun = 'pax'                                     THEN 'pax_total'
+  WHEN measure_noun = 'ebitda' AND measure_kind = 'rate'        THEN 'ebitda_per_pax'
+  WHEN measure_noun = 'ebitda'                                  THEN 'ebitda'
+  WHEN measure_noun = 'opex'   AND measure_kind = 'rate'        THEN 'opex_per_pax'
+  WHEN measure_noun = 'opex'                                    THEN 'opex_total'
+  WHEN measure_noun = 'capex'                                   THEN 'capex'
+  WHEN measure_noun = 'charge' AND family = 'aero'              THEN 'aero_charge'
+  WHEN measure_noun = 'revenue' AND measure_kind = 'rate'    AND family = 'aero'    THEN 'rev_aero_per_pax'
+  WHEN measure_noun = 'revenue' AND measure_kind = 'rate'    AND family = 'nonaero' THEN 'rev_nonaero_per_pax'
+  WHEN measure_noun = 'revenue' AND measure_kind = 'rate'                           THEN 'rev_total_per_pax'
+  WHEN measure_noun = 'revenue' AND measure_kind = 'component' AND family = 'aero'    THEN 'rev_aero_segment'
+  WHEN measure_noun = 'revenue' AND measure_kind = 'component' AND family = 'nonaero' THEN 'rev_nonaero_segment'
+  WHEN measure_noun = 'revenue' AND family = 'aero'                                 THEN 'rev_aero'
+  WHEN measure_noun = 'revenue' AND family = 'nonaero'                              THEN 'rev_nonaero'
+  WHEN measure_noun = 'revenue'                                                     THEN 'rev_total'
   ELSE NULL
 END"""
 
@@ -152,76 +152,105 @@ END"""
 # Mixing 2008 real with nominal is a wrong answer that looks right.
 CURRENCY_SQL = """
 CASE
-  WHEN regexp_matches(cue, '(£|gbp)') THEN 'GBP'
-  WHEN regexp_matches(cue, '(€|eur)') THEN 'EUR'
+  WHEN regexp_matches(cue, '(£|gbp)')   THEN 'GBP'
+  WHEN regexp_matches(cue, '(€|eur)')   THEN 'EUR'
   WHEN regexp_matches(cue, '([$]|usd)') THEN 'USD'
   ELSE ''
 END"""
 
 SCALE_SQL = """
 CASE
-  WHEN regexp_matches(cue, '(000s|000''s|thousand)') THEN 1000
+  WHEN regexp_matches(cue, '(000s|000''s|thousand)')       THEN 1000
   WHEN regexp_matches(cue, '(^| )(m|mn|million)s?( |,|$)') THEN 1000000
-  WHEN regexp_matches(cue, '(bn|billion)') THEN 1000000000
+  WHEN regexp_matches(cue, '(bn|billion)')                 THEN 1000000000
   ELSE 1
 END"""
 
 BASIS_SQL = """
 CASE
-  WHEN regexp_matches(cue, 'nominal') THEN 'nominal'
+  WHEN regexp_matches(cue, 'nominal')             THEN 'nominal'
   WHEN regexp_matches(cue, '(real|[0-9]{4} price)') THEN 'real'
-  WHEN regexp_matches(cue, '[0-9]{4}') THEN 'real'
+  WHEN regexp_matches(cue, '[0-9]{4}')            THEN 'real'
   ELSE ''
 END"""
 
-BASE_YEAR_SQL = "try_cast(nullif(regexp_extract(cue, '(19[0-9]{2}|20[0-9]{2})', 1), '') AS INTEGER)"
+BASE_YEAR_SQL = (
+    "try_cast(nullif(regexp_extract(cue, '(19[0-9]{2}|20[0-9]{2})', 1), '') AS INTEGER)"
+)
+
+# Percent against fraction is a real convention split in the store: the same
+# growth rate appears as 0.028 and as 2.8. Recorded, not silently normalised.
+PCT_SQL = "(unit_l = '%' OR regexp_matches(cue, '%'))"
+
+
+def _chain(rows, value_idx: int, default: str) -> str:
+    """First-match-wins CASE from a rule table."""
+    parts = []
+    for row in rows:
+        target = row[2]
+        col = {"label": "row_label", "unit": "unit_l", "noun": "measure_noun"}[target]
+        val = row[value_idx]
+        if val is None:
+            continue
+        parts.append(f"    WHEN regexp_matches({col}, '{row[3]}') THEN {val}")
+    if not parts:
+        return default
+    return "CASE\n" + "\n".join(parts) + f"\n    ELSE {default}\n  END"
 
 
 def kind_sql() -> str:
-    """First-match-wins CASE over the rule table, for measure_kind."""
-    parts = []
-    for rule_id, kind, target, pattern, _lo, _hi in RULES:
-        col = "row_label" if target == "label" else "unit_l"
-        parts.append(f"    WHEN regexp_matches({col}, '{pattern}') THEN '{kind}'")
-    return "CASE\n" + "\n".join(parts) + "\n    ELSE 'unclassified'\n  END"
+    rows = [(r[0], r[1], r[2], r[3], f"'{r[1]}'", None) for r in KINDS]
+    return _chain(rows, 4, "'unclassified'")
 
 
 def rule_sql() -> str:
-    """The same chain, returning the rule id that fired, so every tag is traceable."""
-    parts = []
-    for rule_id, _kind, target, pattern, _lo, _hi in RULES:
-        col = "row_label" if target == "label" else "unit_l"
-        parts.append(f"    WHEN regexp_matches({col}, '{pattern}') THEN '{rule_id}'")
-    return "CASE\n" + "\n".join(parts) + "\n    ELSE 'R99_none'\n  END"
+    rows = [(r[0], r[1], r[2], r[3], f"'{r[0]}'", None) for r in KINDS]
+    return _chain(rows, 4, "'R99_none'")
 
 
-def band_sql(idx: int) -> str:
-    """Expected value band, so the view can flag magnitude that contradicts class."""
-    parts = []
-    for rule_id, _kind, target, pattern, lo, hi in RULES:
-        bound = (lo, hi)[idx]
-        if bound is None:
-            continue
-        col = "row_label" if target == "label" else "unit_l"
-        parts.append(f"    WHEN regexp_matches({col}, '{pattern}') THEN {bound}")
-    if not parts:
-        return "NULL"
-    return "CASE\n" + "\n".join(parts) + "\n    ELSE NULL\n  END"
+def band_sql(which: int) -> str:
+    rows = [(r[0], r[1], r[2], r[3], r[4] if which == 0 else r[5], None) for r in KINDS]
+    return _chain(rows, 4, "NULL")
+
+
+def noun_sql(col: str) -> str:
+    parts = [f"    WHEN regexp_matches({col}, '{pat}') THEN '{name}'" for name, pat in NOUNS]
+    return "CASE\n" + "\n".join(parts) + "\n    ELSE ''\n  END"
+
+
+def sheet_noun_unambiguous_sql() -> str:
+    """The sheet may supply the noun only if it names exactly ONE measure."""
+    counts = " + ".join(
+        f"CASE WHEN regexp_matches(fam_text, '{pat}') THEN 1 ELSE 0 END"
+        for _name, pat in NOUNS
+    )
+    return f"({counts}) = 1"
+
+
+def canonical_clause(con: duckdb.DuckDBPyConnection, alias: str = "") -> str:
+    """Uncorrelated semi-join. NOT an EXISTS: a correlated outer reference binds
+    to the inner table, so the filter reports itself applied and does nothing.
+    That bug cost us a day on 14 Aug; it is not repeated here."""
+    tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+    if "doc_canonical" not in tables:
+        return ""
+    col = f'{alias}"source_file"' if alias else '"source_file"'
+    return f" AND {col} IN (SELECT source_file FROM doc_canonical WHERE is_canonical)"
 
 
 def classified_sql(where: str) -> str:
-    """One distinct row per (context, sheet): the classification depends only on
-    those, so the map is small even though the store is 722m points."""
+    """One distinct row per (context, sheet): classification depends only on
+    those, so the map stays small against 722m points."""
     return f"""
 WITH base AS (
   SELECT DISTINCT
          context,
          regexp_extract(location, 'sheet=(.*)!', 1) AS sheet,
          trim(regexp_replace(split_part(context, '||', 1),
-                             '^\\s*\\[[^\\]]*\\]\\s*', ''))       AS label_full,
+                             '^\\s*\\[[^\\]]*\\]\\s*', ''))        AS label_full,
          lower(regexp_extract(context, '^\\s*\\[([^\\]]*)\\]', 1)) AS cue,
-         lower(split_part(context, '||', 2))                     AS tail,
-         lower(coalesce(unit, ''))                               AS unit_l
+         lower(split_part(context, '||', 2))                      AS tail,
+         lower(coalesce(unit, ''))                                AS unit_l
   FROM ask_points
   WHERE {where}
 ),
@@ -234,39 +263,62 @@ lab AS (
          END AS row_label
   FROM base
 ),
-tagged AS (
-  SELECT context, sheet, row_label, cue, unit_l,
-         lower(row_label || ' ' || tail) AS fam_text,
+nouned AS (
+  SELECT *,
+         lower(row_label || ' ' || sheet || ' ' || tail) AS fam_text,
+         trim(regexp_replace(row_label, '{DENOM_STRIP}', ' ', 'g')) AS noun_label
+  FROM lab
+),
+labelled AS (
+  SELECT *, {noun_sql('noun_label')} AS label_noun FROM nouned
+),
+resolved AS (
+  SELECT *,
+         CASE WHEN label_noun <> '' THEN label_noun
+              WHEN {sheet_noun_unambiguous_sql()} THEN {noun_sql('fam_text')}
+              ELSE ''
+         END AS measure_noun,
+         CASE WHEN label_noun <> '' THEN 'row_label'
+              WHEN {sheet_noun_unambiguous_sql()} THEN 'sheet_fallback'
+              ELSE 'none'
+         END AS label_source
+  FROM labelled
+),
+kinded AS (
+  SELECT *,
          {kind_sql()} AS measure_kind,
          {rule_sql()} AS rule_id,
          {band_sql(0)} AS band_lo,
-         {band_sql(1)} AS band_hi
-  FROM lab
-),
-famd AS (
-  SELECT *, {FAMILY_SQL} AS family FROM tagged
+         {band_sql(1)} AS band_hi,
+         {FAMILY_SQL} AS family
+  FROM resolved
 )
-SELECT context, sheet, row_label, measure_kind, family,
-       {CODE_SQL}       AS metric_code_v2,
-       {CURRENCY_SQL}   AS currency_v2,
-       {SCALE_SQL}      AS scale_mult,
-       {BASIS_SQL}      AS price_basis,
-       {BASE_YEAR_SQL}  AS base_year,
+SELECT context, sheet, row_label, measure_noun, label_source, measure_kind,
+       family AS metric_family,
+       {CODE_SQL}      AS metric_code_v2,
+       {CURRENCY_SQL}  AS currency_v2,
+       {SCALE_SQL}     AS scale_mult,
+       {BASIS_SQL}     AS price_basis,
+       {BASE_YEAR_SQL} AS base_year,
+       {PCT_SQL}       AS unit_is_pct,
        rule_id, band_lo, band_hi
-FROM famd"""
+FROM kinded"""
 
 
 VIEW_SQL = """
 CREATE OR REPLACE VIEW ask_points_v2 AS
 SELECT p.*,
        t.row_label,
+       t.measure_noun,
+       t.label_source,
        t.measure_kind,
        t.metric_family,
        t.metric_code_v2,
-       nullif(t.currency_v2, '')  AS currency_v2,
+       nullif(t.currency_v2, '') AS currency_v2,
        t.scale_mult,
-       nullif(t.price_basis, '')  AS price_basis,
+       nullif(t.price_basis, '') AS price_basis,
        t.base_year,
+       t.unit_is_pct,
        t.rule_id,
        CASE WHEN t.context IS NULL THEN 'untagged'
             WHEN t.band_lo IS NOT NULL AND p.value_num < t.band_lo THEN 'below_band'
@@ -274,8 +326,9 @@ SELECT p.*,
             ELSE 'ok'
        END AS magnitude_check
 FROM ask_points p
-LEFT JOIN context_tag t ON p.context = t.context
-                       AND regexp_extract(p.location, 'sheet=(.*)!', 1) = t.sheet
+LEFT JOIN context_tag t
+       ON p.context = t.context
+      AND regexp_extract(p.location, 'sheet=(.*)!', 1) = t.sheet
 """
 
 
@@ -285,6 +338,7 @@ def main() -> int:
     ap.add_argument("--entity", default="NCL")
     ap.add_argument("--all", action="store_true", help="whole store, not one entity")
     ap.add_argument("--build", action="store_true", help="write the table and view")
+    ap.add_argument("--no-canonical", action="store_true", help="include duplicate copies")
     ap.add_argument("--out", default=r"E:\Avia\Extract\diag")
     args = ap.parse_args()
 
@@ -292,26 +346,28 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(args.store, read_only=not args.build)
 
-    where = "TRUE" if args.all else f"entity_id = '{args.entity}'"
-    scope = "whole store" if args.all else f"entity_id={args.entity}"
+    canon = "" if args.no_canonical else canonical_clause(con)
+    canon_p = "" if args.no_canonical else canonical_clause(con, "p.")
+    ent = "TRUE" if args.all else f"entity_id = '{args.entity}'"
+    ent_p = "TRUE" if args.all else f"p.entity_id = '{args.entity}'"
+    where = ent + canon
+    where_p = ent_p + canon_p
+
     log: list[str] = []
 
     def say(s: str = "") -> None:
         print(s)
         log.append(s)
 
-    say(f"store : {args.store}")
-    say(f"scope : {scope}")
-    say(f"mode  : {'BUILD (writing)' if args.build else 'dry run (read only)'}")
+    say(f"store     : {args.store}")
+    say(f"scope     : {'whole store' if args.all else 'entity_id=' + args.entity}")
+    say(f"canonical : {'NOT applied' if not canon else 'applied'}")
+    say(f"mode      : {'BUILD (writing)' if args.build else 'dry run (read only)'}")
     say()
 
     if args.build:
         con.execute("DROP TABLE IF EXISTS context_tag")
-        con.execute(
-            "CREATE TABLE context_tag AS "
-            + classified_sql(where).replace("family,", "family AS metric_family,")
-        )
-        con.execute("CREATE INDEX IF NOT EXISTS ix_ctx_tag ON context_tag(context)")
+        con.execute("CREATE TABLE context_tag AS " + classified_sql(where))
         n = con.execute("SELECT count(*) FROM context_tag").fetchone()[0]
         say(f"context_tag written: {n:,} distinct (context, sheet) rows")
         con.execute(VIEW_SQL)
@@ -321,97 +377,75 @@ def main() -> int:
         con.execute("CREATE OR REPLACE TEMP VIEW ctag AS " + classified_sql(where))
         src = "ctag"
 
-    # ---------------------------------------------------------------- report
-    say()
+    join = (
+        f"FROM ask_points p JOIN {src} t ON p.context = t.context "
+        "AND regexp_extract(p.location, 'sheet=(.*)!', 1) = t.sheet "
+        f"WHERE {where_p}"
+    )
+
     say("what the rules claim, by point count")
     rows = con.execute(
-        f"""
-        SELECT t.measure_kind,
-               coalesce(t.metric_code_v2, '(no money code)') AS code_v2,
-               count(*)                    AS n_points,
-               count(DISTINCT p.source_file) AS n_docs,
-               round(median(p.value_num), 3) AS p50
-        FROM ask_points p
-        JOIN {src} t
-          ON p.context = t.context
-         AND regexp_extract(p.location, 'sheet=(.*)!', 1) = t.sheet
-        WHERE {where.replace('entity_id', 'p.entity_id')}
-        GROUP BY 1, 2 ORDER BY n_points DESC
-        """
+        f"""SELECT t.measure_noun, t.measure_kind, t.label_source,
+                   coalesce(t.metric_code_v2, '(no money code)') AS code_v2,
+                   count(*) AS n, round(median(p.value_num), 3) AS p50
+            {join} GROUP BY 1,2,3,4 ORDER BY n DESC LIMIT 30"""
     ).fetchall()
-    say(f"{'n_points':>12} {'docs':>7} {'median':>12}  measure_kind / metric_code_v2")
-    for kind, code, n, nd, p50 in rows:
-        say(f"{n:>12,} {nd:>7,} {str(p50):>12}  {kind} / {code}")
+    say(f"{'n_points':>12} {'median':>12}  noun / kind / source -> code_v2")
+    for noun, kind, srcl, code, n, p50 in rows:
+        say(f"{n:>12,} {str(p50):>12}  {noun or '(none)'} / {kind} / {srcl} -> {code}")
 
     say()
     say("what leaves rev_aero, and what joins it")
-    moved = con.execute(
-        f"""
-        SELECT coalesce(nullif(p.metric_code, ''), '(blank)') AS was,
-               coalesce(t.metric_code_v2, '(none)')           AS now,
-               t.measure_kind, count(*) AS n
-        FROM ask_points p
-        JOIN {src} t
-          ON p.context = t.context
-         AND regexp_extract(p.location, 'sheet=(.*)!', 1) = t.sheet
-        WHERE {where.replace('entity_id', 'p.entity_id')}
-          AND (p.metric_code = 'rev_aero' OR t.metric_code_v2 LIKE 'rev_aero%')
-        GROUP BY 1, 2, 3 ORDER BY n DESC LIMIT 30
-        """
-    ).fetchall()
-    say(f"{'n':>12}  was -> now (measure_kind)")
-    for was, now, kind, n in moved:
+    for was, now, kind, n in con.execute(
+        f"""SELECT coalesce(nullif(p.metric_code, ''), '(blank)'),
+                   coalesce(t.metric_code_v2, '(none)'), t.measure_kind, count(*) AS n
+            {join} AND (p.metric_code = 'rev_aero' OR t.metric_code_v2 LIKE 'rev_aero%')
+            GROUP BY 1,2,3 ORDER BY n DESC LIMIT 25"""
+    ).fetchall():
         say(f"{n:>12,}  {was} -> {now} ({kind})")
 
     say()
-    say("sample row labels per class, to eyeball the rules")
-    for (kind,) in con.execute(
-        f"SELECT DISTINCT measure_kind FROM {src} ORDER BY 1"
+    say("did the noun rule stop the promotions it was written to stop")
+    for was, now, n in con.execute(
+        f"""SELECT p.metric_code, coalesce(t.metric_code_v2, '(none)'), count(*) AS n
+            {join} AND p.metric_code IN ('ebitda','gdp_elasticity','opex_total','capex','pax_total')
+            GROUP BY 1,2 ORDER BY n DESC LIMIT 15"""
     ).fetchall():
-        labs = con.execute(
-            f"SELECT row_label, rule_id FROM {src} WHERE measure_kind = ? "
-            "AND row_label <> '' LIMIT 6",
-            [kind],
-        ).fetchall()
-        say(f"  {kind:<14}: " + "; ".join(f"{l[:40]} [{r}]" for l, r in labs))
+        say(f"{n:>12,}  {was} -> {now}")
 
     say()
-    say("magnitude conflicts (value contradicts the class it was given)")
-    conf = con.execute(
-        f"""
-        SELECT t.measure_kind, count(*) AS n
-        FROM ask_points p
-        JOIN {src} t
-          ON p.context = t.context
-         AND regexp_extract(p.location, 'sheet=(.*)!', 1) = t.sheet
-        WHERE {where.replace('entity_id', 'p.entity_id')}
-          AND ((t.band_lo IS NOT NULL AND p.value_num < t.band_lo)
-            OR (t.band_hi IS NOT NULL AND p.value_num > t.band_hi))
-        GROUP BY 1 ORDER BY n DESC
-        """
-    ).fetchall()
-    for kind, n in conf:
-        say(f"  {kind:<14}: {n:,}")
-    if not conf:
-        say("  none")
+    say("GOLD CHECK: aero revenue per pax at this entity, by year")
+    for yr, n, lo, p50, hi in con.execute(
+        f"""SELECT p.year, count(*) AS n, round(min(p.value_num),2),
+                   round(median(p.value_num),2), round(max(p.value_num),2)
+            {join} AND t.metric_code_v2 = 'rev_aero_per_pax'
+              AND t.label_source = 'row_label' AND p.year BETWEEN 2005 AND 2015
+            GROUP BY 1 ORDER BY 1"""
+    ).fetchall():
+        say(f"  {yr}  n={n:>7,}  min {lo:>8}  median {p50:>8}  max {hi:>8}")
+    say("  (Newcastle 2009 should read circa GBP 5.17)")
 
     say()
-    say("coverage: points the rules could not place")
+    say("magnitude conflicts, and unplaced points")
+    for kind, n in con.execute(
+        f"""SELECT t.measure_kind, count(*) AS n {join}
+            AND ((t.band_lo IS NOT NULL AND p.value_num < t.band_lo)
+              OR (t.band_hi IS NOT NULL AND p.value_num > t.band_hi))
+            GROUP BY 1 ORDER BY n DESC"""
+    ).fetchall():
+        say(f"  conflict {kind:<14}: {n:,}")
     cov = con.execute(
-        f"""
-        SELECT count(*) FILTER (WHERE t.context IS NULL)                       AS no_tag,
-               count(*) FILTER (WHERE t.measure_kind = 'unclassified')         AS unclassified,
-               count(*)                                                        AS total
-        FROM ask_points p
-        LEFT JOIN {src} t
-          ON p.context = t.context
-         AND regexp_extract(p.location, 'sheet=(.*)!', 1) = t.sheet
-        WHERE {where.replace('entity_id', 'p.entity_id')}
-        """
+        f"""SELECT count(*) FILTER (WHERE t.label_source = 'row_label'),
+                   count(*) FILTER (WHERE t.label_source = 'sheet_fallback'),
+                   count(*) FILTER (WHERE t.label_source = 'none'),
+                   count(*) FILTER (WHERE t.metric_code_v2 IS NOT NULL),
+                   count(*) {join}"""
     ).fetchone()
-    say(f"  no context match : {cov[0]:,}")
-    say(f"  unclassified     : {cov[1]:,}")
-    say(f"  total in scope   : {cov[2]:,}")
+    say(f"  noun from row label : {cov[0]:,}")
+    say(f"  noun from sheet     : {cov[1]:,}")
+    say(f"  no noun found       : {cov[2]:,}")
+    say(f"  carries a money code: {cov[3]:,}")
+    say(f"  total in scope      : {cov[4]:,}")
 
     (out / "metric_tags_report.txt").write_text("\n".join(log), encoding="utf-8")
     con.close()
