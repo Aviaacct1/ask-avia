@@ -37,7 +37,7 @@ def test_search_matches_name_or_iata(store):
 def test_search_excludes_quarantined_source(store):
     recs, echoed = store.search(metric="aero", entity="NCL")
     assert "QP1" not in {r.get("record_id") for r in recs}
-    assert echoed.get("quarantined_excluded") == 1
+    assert echoed.get("quarantine") == "excluded in query"
 
 
 def test_get_point_present_and_missing(store):

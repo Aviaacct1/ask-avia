@@ -337,12 +337,16 @@ class Store:
                 names.append(concept)
         return cols, names
 
-    def search(self, *, metric=None, entity=None, geography=None, year_from=None,
-               year_to=None, data_class=None, status=None, limit=200):
-        """Parameterised read-only structured query. Returns (records, echoed_filters).
-        Every filter is optional; a filter on an ABSENT concept is not silently dropped,
-        it is reported in echoed_filters['not_applicable'] so the caller can see what was
-        and was not applied and correct it in plain language."""
+    def _build_where(self, *, metric=None, entity=None, geography=None, year_from=None,
+                     year_to=None, data_class=None, status=None,
+                     require_metric_code=False):
+        """Build the WHERE clause shared by search() and summarise().
+
+        Extracted so the two cannot drift: a summary that counted a different population
+        from the one a subsequent search returns would be worse than no summary at all.
+
+        Returns (where_fragments, params, applied, ignored). A filter on an ABSENT concept
+        is never silently dropped; it lands in `ignored` so the caller can report it."""
         cm = self.bound.columns
         where, params, applied, ignored = [], [], {}, []
 
@@ -384,6 +388,42 @@ class Store:
         eq("data_class", data_class)
         eq("verification_status", status)
 
+        # A point with a blank metric_code does not know what it measures. It is still
+        # held, and still returned by default, because hiding it would misrepresent the
+        # store. But a caller that wants only points that know what they are can say so,
+        # which is the difference between an answerable query and a fishing expedition.
+        if require_metric_code:
+            if cm.has("metric_code"):
+                col = cm.quoted("metric_code")
+                where.append(f"({col} IS NOT NULL AND CAST({col} AS VARCHAR) <> '')")
+                applied["require_metric_code"] = True
+            else:
+                ignored.append("require_metric_code")
+
+        # Defence in depth on the quarantine. The Benchmark folder is the exam paper for
+        # the pipeline; the harvest excludes it and search() filters it again on the way
+        # out, but excluding it in SQL means a COUNT can never be inflated by it either.
+        if cm.has("source"):
+            src = cm.quoted("source")
+            for excluded in cfg.EXCLUDED_CORPUS_PATHS:
+                where.append(f"COALESCE(CAST({src} AS VARCHAR), '') NOT ILIKE ?")
+                params.append(f"{excluded}%")
+
+        return where, params, applied, ignored
+
+    def search(self, *, metric=None, entity=None, geography=None, year_from=None,
+               year_to=None, data_class=None, status=None, limit=25,
+               require_metric_code=False):
+        """Parameterised read-only structured query. Returns (records, echoed_filters).
+        Every filter is optional; a filter on an ABSENT concept is not silently dropped,
+        it is reported in echoed_filters['not_applicable'] so the caller can see what was
+        and was not applied and correct it in plain language."""
+        where, params, applied, ignored = self._build_where(
+            metric=metric, entity=entity, geography=geography,
+            year_from=year_from, year_to=year_to, data_class=data_class,
+            status=status, require_metric_code=require_metric_code,
+        )
+
         cols, names = self._select(self._RETURN_CONCEPTS)
         sql = f'SELECT {", ".join(cols)} FROM "{self.bound.points_table}"'
         if where:
@@ -406,9 +446,134 @@ class Store:
             "limit": int(limit),
             "returned": len(records),
         }
+        # Say which layer refused the quarantine, rather than leaving it silent. The
+        # exclusion now happens in the WHERE clause, so the post-filter above normally
+        # sees nothing to drop; it stays as belt and braces and reports separately if it
+        # ever does fire, which would mean the SQL exclusion had a hole.
+        if self.bound.columns.has("source"):
+            echoed["quarantine"] = "excluded in query"
         if len(found) != len(records):
             echoed["quarantined_excluded"] = len(found) - len(records)
         return records, echoed
+
+    # Facets a summary reports on, in the order they are most useful for narrowing.
+    # metric_code first because a blank one is the defect that sends a caller hunting.
+    _SUMMARY_FACETS = ("metric_code", "unit", "data_class", "temporality", "year")
+
+    # How many path segments make a useful folder grouping. A full Egnyte path is far too
+    # granular to count by; the first few segments name the area of the business.
+    _SOURCE_FOLDER_DEPTH = 5
+
+    def summarise(self, *, metric=None, entity=None, geography=None, year_from=None,
+                  year_to=None, data_class=None, status=None,
+                  require_metric_code=False, top=15):
+        """What the store HOLDS for a filter, as grouped counts, without returning rows.
+
+        The problem this solves. Asked a question it cannot answer from 25 records with
+        blank metric codes, a model issues query after query with different filters, and
+        every one is a full scan of 722m rows. One summary call tells it what is actually
+        held, so the next call can be aimed. Ten scans become two.
+
+        It is also the honest view of the store's condition: if a scope holds 40,000
+        points and 38,000 of them have a blank metric_code, that is the first thing the
+        answer should say, not something the reader infers from odd-looking records.
+
+        Counts are exact, over the whole filtered population, not a sample. Facets are
+        computed in ONE pass over a materialised subset rather than one scan per facet.
+        Returns (summary, echoed_filters)."""
+        cm = self.bound.columns
+        where, params, applied, ignored = self._build_where(
+            metric=metric, entity=entity, geography=geography,
+            year_from=year_from, year_to=year_to, data_class=data_class,
+            status=status, require_metric_code=require_metric_code,
+        )
+
+        # An unfiltered summary would materialise the entire store. Refuse rather than
+        # spend minutes producing a number nobody asked a question about.
+        if not applied:
+            return (
+                {"note": "a summary needs at least one filter; summarising the whole "
+                         "store would scan every row and answer no question."},
+                {"understood_as": applied, "not_applicable": sorted(set(ignored))},
+            )
+
+        facets = [c for c in self._SUMMARY_FACETS if cm.has(c)]
+        has_source = cm.has("source")
+        if not facets and not has_source:
+            return (
+                {"note": "the bound store carries none of the concepts a summary groups "
+                         f"by: {list(self._SUMMARY_FACETS)} or source."},
+                {"understood_as": applied, "not_applicable": sorted(set(ignored))},
+            )
+
+        select_bits = [f'{cm.quoted(c)} AS "{c}"' for c in facets]
+        if has_source:
+            select_bits.append(f'{cm.quoted("source")} AS "source"')
+
+        sql = f'WITH f AS MATERIALIZED (SELECT {", ".join(select_bits)} '
+        sql += f'FROM "{self.bound.points_table}"'
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += "), facets AS (\n"
+
+        # One SELECT per facet over the materialised subset, unioned. '(blank)' is used
+        # rather than dropping empties, because the count of blanks is the finding.
+        unions = ["SELECT '_total' AS facet, 'all' AS key, COUNT(*) AS n FROM f"]
+        for concept in facets:
+            unions.append(
+                f"SELECT '{concept}', COALESCE(NULLIF(CAST(\"{concept}\" AS VARCHAR), ''),"
+                f" '(blank)'), COUNT(*) FROM f GROUP BY 2"
+            )
+        if has_source:
+            folder = (
+                "COALESCE(NULLIF(array_to_string(list_slice(string_split("
+                f"COALESCE(CAST(\"source\" AS VARCHAR), ''), '/'), 1, "
+                f"{self._SOURCE_FOLDER_DEPTH}), '/'), ''), '(blank)')"
+            )
+            unions.append(
+                f"SELECT 'source_folder', {folder}, COUNT(*) FROM f GROUP BY 2"
+            )
+        sql += "\n  UNION ALL ".join(unions)
+        sql += "\n) SELECT facet, key, n FROM facets "
+        sql += "QUALIFY row_number() OVER (PARTITION BY facet ORDER BY n DESC) <= ? "
+        sql += "ORDER BY facet, n DESC"
+        params = list(params) + [int(top)]
+
+        try:
+            rows = self._conn().execute(sql, params).fetchall()
+        except Exception as exc:  # noqa: BLE001 - the reason must reach the caller
+            raise StoreError(
+                f"summarise failed: {type(exc).__name__}: {exc}\nSQL: {sql}"
+            ) from exc
+
+        grouped: dict[str, list[dict]] = {}
+        total = 0
+        for facet, key, n in rows:
+            if facet == "_total":
+                total = int(n)
+                continue
+            grouped.setdefault(facet, []).append({"value": key, "count": int(n)})
+
+        summary: dict[str, Any] = {"matching_points": total, "by": grouped,
+                                   "top_per_facet": int(top)}
+
+        # State the condition of the scope plainly rather than leaving it to be inferred.
+        blank_metric = next(
+            (e["count"] for e in grouped.get("metric_code", []) if e["value"] == "(blank)"),
+            0,
+        )
+        if total and blank_metric:
+            summary["untagged_metric_points"] = blank_metric
+            summary["untagged_metric_share"] = round(100.0 * blank_metric / total, 1)
+            summary["caveat"] = (
+                f"{blank_metric:,} of {total:,} points in this scope ({summary['untagged_metric_share']}%) "
+                f"carry NO metric_code, so they do not record what they measure. Filter "
+                f"with require_metric_code to exclude them. Known defect: metric tagging "
+                f"is incomplete and conflates totals, rates and factors; figures from this "
+                f"scope are not yet validated."
+            )
+        echoed = {"understood_as": applied, "not_applicable": sorted(set(ignored))}
+        return summary, echoed
 
     def get_point(self, record_id):
         """Fetch one record by id (point_id), or None if the store does not hold it.

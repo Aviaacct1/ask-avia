@@ -82,8 +82,20 @@ def build_server(store: "st.Store", audit: "AuditLog"):
 
     @server.tool(
         name="search_datapoints",
-        description=("Structured query over the store. Echoes the filters it applied and "
-                     "names any it could not apply. Returns cited records."),
+        description=(
+            "Structured query over the store. Echoes the filters it applied and names "
+            "any it could not apply. Returns cited records.\n\n"
+            "START WITH summarise=true. That returns grouped counts of what the store "
+            "holds for a filter (by metric_code, unit, data_class, year and source "
+            "folder) and no rows, so you can aim one query instead of guessing. Each "
+            "query is a full scan of a very large table, so repeated speculative "
+            "searches are expensive and slow.\n\n"
+            "Many points carry a BLANK metric_code, meaning they do not record what "
+            "they measure; the summary states how many. Pass require_metric_code=true "
+            "to exclude them. Metric tagging is a known open defect: tags are "
+            "incomplete and conflate totals, rates and factors, so treat figures as "
+            "unvalidated and always check the source document before quoting one."
+        ),
     )
     def search_datapoints_tool(
         metric: str | None = None,
@@ -93,13 +105,16 @@ def build_server(store: "st.Store", audit: "AuditLog"):
         year_to: int | None = None,
         data_class: str | None = None,
         status: str | None = None,
-        limit: int = 200,
+        limit: int = search_datapoints.DEFAULT_LIMIT,
+        require_metric_code: bool = False,
+        summarise: bool = False,
     ) -> dict:
         with _LOCK:
             return search_datapoints.run(
                 store, audit, user=CALLER, metric=metric, entity=entity,
                 geography=geography, year_from=year_from, year_to=year_to,
                 data_class=data_class, status=status, limit=limit,
+                require_metric_code=require_metric_code, summarise=summarise,
             )
 
     @server.tool(
