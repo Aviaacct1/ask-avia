@@ -35,8 +35,32 @@ ENV_EGNYTE_DOMAIN = "ASKAVIA_EGNYTE_DOMAIN"
 ENV_EGNYTE_TOKEN = "ASKAVIA_EGNYTE_TOKEN"
 ENV_AUDIT_DIR = "ASKAVIA_AUDIT_DIR"
 ENV_STAGING_DIR = "ASKAVIA_STAGING_DIR"
+ENV_ALLOWED_HOSTS = "ASKAVIA_ALLOWED_HOSTS"
+ENV_ALLOWED_ORIGINS = "ASKAVIA_ALLOWED_ORIGINS"
 
 DEFAULT_PORT = 8040  # 8030 is DDFS. Registered per RUN.md; see docs/PORTS.md.
+
+# --------------------------------------------------------------------------------------
+# DNS rebinding protection (mcp.server.transport_security).
+#
+# The MCP transport validates the Host header of every request against an allow-list and
+# returns 421 "Invalid Host header" on a miss. The protection exists so that a page open
+# in someone's browser cannot resolve a name to 127.0.0.1 and read the Library through
+# the service running on their own machine. It stays ON.
+#
+# The consequence is that a public hostname in front of the service must be declared. When
+# ask-avia is reached through the Cloudflare tunnel the Host header is the public name,
+# not localhost, so that name goes in ASKAVIA_ALLOWED_HOSTS on the host that serves it.
+# The defaults below cover a local run only, which is what a dev box and the test suite
+# need.
+#
+# Origins are separate and sharper: an EMPTY allowed_origins list rejects any request
+# carrying an Origin header at all, with 403. A caller that sends no Origin is unaffected.
+# Declare the origins that may reach the service rather than discovering this as a 403.
+# --------------------------------------------------------------------------------------
+
+DEFAULT_ALLOWED_HOSTS = ("127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*")
+DEFAULT_ALLOWED_ORIGINS: tuple[str, ...] = ()
 
 # --------------------------------------------------------------------------------------
 # The benchmark quarantine. AIP Note 2 open issue O9: the exclusion belongs in pipeline
@@ -113,6 +137,8 @@ class Config:
     egnyte_token: str
     audit_dir: Path
     staging_dir: Path
+    allowed_hosts: tuple[str, ...] = DEFAULT_ALLOWED_HOSTS
+    allowed_origins: tuple[str, ...] = DEFAULT_ALLOWED_ORIGINS
 
     def redacted(self) -> dict[str, str]:
         """Safe to print and to log. Secrets are reported as present or absent only."""
@@ -128,6 +154,8 @@ class Config:
             "egnyte_token": "set" if self.egnyte_token else "MISSING",
             "audit_dir": str(self.audit_dir),
             "staging_dir": str(self.staging_dir),
+            "allowed_hosts": ", ".join(self.allowed_hosts),
+            "allowed_origins": ", ".join(self.allowed_origins) or "(none)",
         }
 
 
@@ -140,6 +168,16 @@ def _require_env(name: str, why: str) -> str:
             f"This service fails closed rather than starting without it."
         )
     return value
+
+
+def _csv_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """A comma-separated environment variable as a tuple. Unset falls back to `default`;
+    set-but-empty means an explicit empty list, which is a different intent."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    items = tuple(part.strip() for part in raw.split(",") if part.strip())
+    return items
 
 
 def resolve_data_root() -> Path:
@@ -232,4 +270,6 @@ def load(require_secrets: bool = True) -> Config:
         egnyte_token=egnyte_token,
         audit_dir=audit_dir,
         staging_dir=staging_dir,
+        allowed_hosts=_csv_env(ENV_ALLOWED_HOSTS, DEFAULT_ALLOWED_HOSTS),
+        allowed_origins=_csv_env(ENV_ALLOWED_ORIGINS, DEFAULT_ALLOWED_ORIGINS),
     )

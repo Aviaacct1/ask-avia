@@ -164,8 +164,24 @@ def _bearer_middleware(expected_token: str):
 def build_app(conf: "cfg.Config", store: "st.Store", audit: "AuditLog"):
     """The ASGI app: the MCP streamable-HTTP app wrapped with bearer auth and a /health
     route. Returned rather than run, so a selftest can inspect it."""
+    from mcp.server.transport_security import TransportSecuritySettings
+
     server = build_server(store, audit)
-    app = server.streamable_http_app()
+
+    # DNS rebinding protection stays ON. It validates the Host header against an
+    # allow-list and returns 421 on a miss, which is what stops a page in someone's
+    # browser reaching a service on their own 127.0.0.1 and reading the Library. Behind
+    # the Cloudflare tunnel the Host header is the PUBLIC name, so that name has to be
+    # declared or every tunnelled request is refused; it comes from config, never
+    # hardcoded. Origins are separate: an empty allowed_origins refuses any request that
+    # carries an Origin header at all, with 403.
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=list(conf.allowed_hosts),
+        allowed_origins=list(conf.allowed_origins),
+    )
+
+    app = server.streamable_http_app(transport_security=security)
     app.add_middleware(_bearer_middleware(conf.auth_token))
 
     async def health(_request):
