@@ -17,6 +17,7 @@ Run:  python -m askavia.server        (reads config from the environment; see .e
 from __future__ import annotations
 
 import os
+import secrets
 import threading
 
 from . import config as cfg
@@ -33,6 +34,9 @@ _LOCK = threading.Lock()
 # registered account, not an individual; ASKAVIA_USER can name it. Refined when per-user
 # identity exists.
 CALLER = os.environ.get("ASKAVIA_USER", "").strip() or "ask-avia-connector"
+
+# The query-parameter name accepted as an alternative to the Authorization header.
+TOKEN_QUERY_PARAM = "token"
 
 
 def build_server(store: "st.Store", audit: "AuditLog"):
@@ -97,24 +101,61 @@ def build_server(store: "st.Store", audit: "AuditLog"):
     return server
 
 
+def _presented_token(request) -> str:
+    """The token the caller presented, from the Authorization header if there is one, or
+    from the `token` query parameter if there is not.
+
+    The query-parameter route exists because Claude's custom-connector dialog offers only
+    a name, a URL and optional OAuth client credentials. There is no field for a static
+    bearer header, so a header-only service cannot be registered at all. The token
+    therefore travels in the URL:
+
+        https://ask.aviacortex.com/mcp?token=<token>
+
+    This is deliberately weaker than a header. A URL reaches browser history, proxy and
+    edge logs, and anything anyone pastes into an email or a chat. It is accepted for a
+    controlled internal rollout with rotatable tokens, and is to be replaced by OAuth once
+    the per-user token registry is in place. The header remains the preferred route and is
+    checked first."""
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        presented = header[7:].strip()
+        if presented:
+            return presented
+    return (request.query_params.get(TOKEN_QUERY_PARAM) or "").strip()
+
+
 def _bearer_middleware(expected_token: str):
     """A Starlette middleware that rejects any request without the exact bearer token,
     before it reaches a tool. This is the enforcement of the fail-closed auth."""
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
 
+    def _refuse():
+        return JSONResponse(
+            {"error": "unauthorised",
+             "detail": "ask-avia requires a valid bearer token and fails closed."},
+            status_code=401,
+        )
+
     class BearerAuth(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
             if request.url.path == "/health":
                 return await call_next(request)
-            header = request.headers.get("authorization", "")
-            token = header[7:].strip() if header.lower().startswith("bearer ") else ""
-            if not expected_token or token != expected_token:
-                return JSONResponse(
-                    {"error": "unauthorised",
-                     "detail": "ask-avia requires a valid bearer token and fails closed."},
-                    status_code=401,
-                )
+            if not expected_token:
+                return _refuse()
+            presented = _presented_token(request)
+            if not presented:
+                return _refuse()
+            # Constant-time comparison so a wrong token cannot be recovered by timing.
+            # compare_digest raises TypeError on non-ASCII input; treat that as a refusal
+            # rather than a 500, so the service still fails closed.
+            try:
+                ok = secrets.compare_digest(presented, expected_token)
+            except TypeError:
+                ok = False
+            if not ok:
+                return _refuse()
             return await call_next(request)
 
     return BearerAuth
