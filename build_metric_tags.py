@@ -104,8 +104,12 @@ KINDS = [
     ("R02_growth", "growth", "label", r"(yoy|y/y|year on year|year-on-year|cagr|% change|% chg|change in|growth|variance|delta)", -500.0, 500.0),
     ("R03_index", "index", "label", r"(consumer price index|inflation index|price index|deflator|^index|index$|elasticit|^cpi|^rpi|^gdp|\(cpi|\(rpi)", -100.0, 100000.0),
     # A per-unit denominator anywhere makes it a rate, whatever the noun.
-    ("R04_rate_unit", "rate", "unit", r"^(per pax|per passenger|/pax|per wlu|per atm)$", -100000.0, 100000.0),
-    ("R05_rate_label", "rate", "label", r"(per pax|per pass|per passenger|per wlu|per atm|per movement|per fte|per sqm|per employee|/pax|rev/pax|yield|average fare|unit rate)", -100000.0, 100000.0),
+    # Band tightened after the Newcastle dry run: at +/-100,000 it admitted a
+    # per-pax figure of 71,412. A revenue per passenger above four digits is a
+    # level or a variance that has leaked into the rate class, in any currency
+    # this firm works in.
+    ("R04_rate_unit", "rate", "unit", r"^(per pax|per passenger|/pax|per wlu|per atm)$", -1000.0, 1000.0),
+    ("R05_rate_label", "rate", "label", r"(per pax|per pass|per passenger|per wlu|per atm|per movement|per fte|per sqm|per employee|/pax|rev/pax|yield|average fare|unit rate)", -1000.0, 1000.0),
     ("R06_volume", "volume", "label", r"^(pax|passengers?|total pax|atms?|air transport movements|movements|wlu|seats)\b", None, None),
     ("R07_component", "component", "label", r"(low cost|lcc|charter|scheduled|full service|domestic|international|^eu\b|non-eu|non eu|british airways|other airlines|transfer|freight|mail|general aviation|car park|parking|duty free|retail|advertising|concession|fuel|handling|hbs|cute|check-in|transactions|rental|catering)", None, None),
     ("R08_total", "level", "label", r"(^total|^sub ?total|^net\b|^gross\b|^reported|^normalised)", None, None),
@@ -313,7 +317,15 @@ SELECT p.*,
        t.label_source,
        t.measure_kind,
        t.metric_family,
-       t.metric_code_v2,
+       -- A point whose magnitude contradicts its class LOSES its code, it does
+       -- not merely carry a warning. Flagging relies on the caller remembering
+       -- to filter; this does not. metric_code_v2_raw is kept so the rules can
+       -- still be audited against what they originally claimed.
+       CASE WHEN (t.band_lo IS NOT NULL AND p.value_num < t.band_lo)
+              OR (t.band_hi IS NOT NULL AND p.value_num > t.band_hi)
+            THEN NULL ELSE t.metric_code_v2
+       END AS metric_code_v2,
+       t.metric_code_v2 AS metric_code_v2_raw,
        nullif(t.currency_v2, '') AS currency_v2,
        t.scale_mult,
        nullif(t.price_basis, '') AS price_basis,
@@ -447,6 +459,8 @@ def main() -> int:
                    round(median(p.value_num),2), round(max(p.value_num),2)
             {join} AND t.metric_code_v2 = 'rev_aero_per_pax'
               AND t.label_source = 'row_label' AND p.year BETWEEN 2005 AND 2015
+              AND (t.band_lo IS NULL OR p.value_num >= t.band_lo)
+              AND (t.band_hi IS NULL OR p.value_num <= t.band_hi)
             GROUP BY 1 ORDER BY 1"""
     ).fetchall():
         say(f"  {yr}  n={n:>7,}  min {lo:>8}  median {p50:>8}  max {hi:>8}")

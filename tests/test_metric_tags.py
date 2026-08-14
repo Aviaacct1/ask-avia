@@ -171,3 +171,48 @@ def test_scale_cue_yields_currency_scale_and_price_basis(tags):
 def test_a_miscoded_point_is_corrected_not_merely_relabelled(tags):
     # Held as average_fare in the store; it is a revenue level.
     assert tags["p_fare"]["code"] == "rev_aero"
+
+
+def test_an_out_of_band_rate_loses_its_code_in_the_view(tmp_path):
+    """The Newcastle dry run returned a revenue per passenger of 71,412: a
+    level that had leaked into the rate class. Flagging it is not enough,
+    because that relies on every caller remembering to filter. It must lose
+    the code itself. This is the same failure shape as the canonical_only
+    filter that reported itself applied and returned every row."""
+    path = str(tmp_path / "veto.duckdb")
+    con = duckdb.connect(path)
+    con.execute("""
+        CREATE TABLE ask_points (
+          point_id VARCHAR, value_num DOUBLE, metric_code VARCHAR, entity_id VARCHAR,
+          unit VARCHAR, source_file VARCHAR, project_id VARCHAR, review_status VARCHAR,
+          source_type_flag VARCHAR, temporality VARCHAR, currency VARCHAR,
+          value_scale VARCHAR, location VARCHAR, context VARCHAR, year INTEGER)
+    """)
+    ctx = "[Nominal] Yield Aero Revenue || [%] Newcastle Airport"
+    con.executemany(
+        "INSERT INTO ask_points VALUES (?,?,'rev_aero','NCL','','/a.xls','pr','','',"
+        "'actual','','','sheet=Aero Revenue!C6',?,2009)",
+        [("plausible", 5.17, ctx), ("leaked", 71412.37, ctx)],
+    )
+    con.execute("CREATE TABLE context_tag AS " + B.classified_sql("TRUE"))
+    con.execute(B.VIEW_SQL)
+
+    got = dict(
+        con.execute(
+            "SELECT point_id, metric_code_v2 FROM ask_points_v2"
+        ).fetchall()
+    )
+    assert got["plausible"] == "rev_aero_per_pax"
+    assert got["leaked"] is None
+
+    # and the rule's own claim survives for audit, so the veto is visible
+    raw = dict(
+        con.execute(
+            "SELECT point_id, metric_code_v2_raw FROM ask_points_v2"
+        ).fetchall()
+    )
+    assert raw["leaked"] == "rev_aero_per_pax"
+    assert con.execute(
+        "SELECT magnitude_check FROM ask_points_v2 WHERE point_id = 'leaked'"
+    ).fetchone()[0] == "above_band"
+    con.close()
