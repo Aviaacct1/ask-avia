@@ -426,13 +426,19 @@ class Store:
 
         # Count each document once. Reported separately from `not_applicable`, which is
         # about filters the CALLER asked for; this is the store's own condition.
+        # An UNCORRELATED IN, deliberately, not a correlated EXISTS. With
+        #     EXISTS (SELECT 1 FROM doc_canonical dc WHERE dc.source_file = "source_file")
+        # the unqualified outer reference binds to the INNER table first, so the predicate
+        # compares dc.source_file with itself, is always true, and the filter silently does
+        # nothing: the first build reported "applied" and returned all 521,875 rows. The
+        # form below has nothing to shadow and DuckDB plans it as a semi-join.
         dedup = "unavailable"
         if canonical_only:
             if self.bound.canonical_table and cm.has("source"):
                 src = cm.quoted("source")
                 where.append(
-                    f'EXISTS (SELECT 1 FROM "{self.bound.canonical_table}" dc '
-                    f"WHERE dc.source_file = {src} AND dc.is_canonical)"
+                    f'{src} IN (SELECT source_file FROM '
+                    f'"{self.bound.canonical_table}" WHERE is_canonical)'
                 )
                 dedup = "applied"
         else:
