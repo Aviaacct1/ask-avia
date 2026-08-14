@@ -42,13 +42,15 @@ def run(
     status: str | None = None,
     limit: int = DEFAULT_LIMIT,
     require_metric_code: bool = False,
+    canonical_only: bool = True,
     summarise: bool = False,
 ) -> dict[str, Any]:
     filters = {
         "metric": metric, "entity": entity, "geography": geography,
         "year_from": year_from, "year_to": year_to,
         "data_class": data_class, "status": status,
-        "require_metric_code": require_metric_code, "summarise": summarise,
+        "require_metric_code": require_metric_code,
+        "canonical_only": canonical_only, "summarise": summarise,
     }
 
     if summarise:
@@ -57,6 +59,7 @@ def run(
             year_from=year_from, year_to=year_to,
             data_class=data_class, status=status,
             require_metric_code=require_metric_code,
+            canonical_only=canonical_only,
         )
         audit.record(user=user, tool="search_datapoints", filters=filters,
                      record_ids=[],
@@ -66,6 +69,7 @@ def run(
             "mode": "summary",
             "understood_as": echoed["understood_as"],
             "not_applicable": echoed["not_applicable"],
+            "deduplication": echoed.get("deduplication"),
             "provenance": store.bound.provenance_note(),
         }
         result.update(summary)
@@ -85,6 +89,7 @@ def run(
         year_from=year_from, year_to=year_to,
         data_class=data_class, status=status, limit=limit,
         require_metric_code=require_metric_code,
+        canonical_only=canonical_only,
     )
     ids = [r.get("record_id") for r in records if r.get("record_id")]
 
@@ -97,6 +102,7 @@ def run(
         "mode": "records",
         "understood_as": echoed["understood_as"],
         "not_applicable": echoed["not_applicable"],
+        "deduplication": echoed.get("deduplication"),
         "count": len(records),
         "records": [r.as_dict() for r in records],
         "provenance": store.bound.provenance_note(),

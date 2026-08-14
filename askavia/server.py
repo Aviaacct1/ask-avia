@@ -94,7 +94,12 @@ def build_server(store: "st.Store", audit: "AuditLog"):
             "they measure; the summary states how many. Pass require_metric_code=true "
             "to exclude them. Metric tagging is a known open defect: tags are "
             "incomplete and conflate totals, rates and factors, so treat figures as "
-            "unvalidated and always check the source document before quoting one."
+            "unvalidated and always check the source document before quoting one.\n\n"
+            "Results count each DOCUMENT once by default. Avia projects were built by "
+            "copying the previous project's folder, so the same workbook exists at "
+            "several paths; counting those separately made a figure stated once look "
+            "corroborated. canonical_only=false returns every copy, which is useful "
+            "only for asking where a document is filed."
         ),
     )
     def search_datapoints_tool(
@@ -107,6 +112,7 @@ def build_server(store: "st.Store", audit: "AuditLog"):
         status: str | None = None,
         limit: int = search_datapoints.DEFAULT_LIMIT,
         require_metric_code: bool = False,
+        canonical_only: bool = True,
         summarise: bool = False,
     ) -> dict:
         with _LOCK:
@@ -114,7 +120,8 @@ def build_server(store: "st.Store", audit: "AuditLog"):
                 store, audit, user=CALLER, metric=metric, entity=entity,
                 geography=geography, year_from=year_from, year_to=year_to,
                 data_class=data_class, status=status, limit=limit,
-                require_metric_code=require_metric_code, summarise=summarise,
+                require_metric_code=require_metric_code,
+                canonical_only=canonical_only, summarise=summarise,
             )
 
     @server.tool(

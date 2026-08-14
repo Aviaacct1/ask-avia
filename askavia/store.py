@@ -53,6 +53,14 @@ MANIFEST_TABLE_HINTS = ("harvest_manifest", "skip", "manifest")
 # get_source must be able to query in order to disclose "3 of 41 documents skipped".
 SKIP_TABLE_HINTS = ("skip", "skipped", "manifest")
 
+# The document deduplication table written by build_dedup.py: one row per source_file,
+# carrying is_canonical and the path of the canonical copy. Every new project at Avia
+# copied the previous project's folder in wholesale, so the same workbook was harvested
+# three and four times over; counting those as separate evidence made a figure stated
+# once look corroborated. Filtering to canonical documents cut aeronautical revenue at
+# Newcastle from 521,875 points to 68,870 while losing 142 of 14,113 distinct values.
+CANONICAL_TABLE = "doc_canonical"
+
 
 @dataclass(frozen=True)
 class ConceptSpec:
@@ -161,6 +169,10 @@ class BoundStore:
     skip_table: str | None
     row_count: int
     resolve_state: dict[str, float]
+    # The document deduplication table written by build_dedup.py, if the store carries
+    # one. None means an older store that predates it; queries then run undeduplicated
+    # and say so, rather than silently counting copies as separate evidence.
+    canonical_table: str | None = None
 
     def describe(self) -> str:
         resolved = ", ".join(f"{k} {v:.0f}%" for k, v in sorted(self.resolve_state.items()))
@@ -259,6 +271,9 @@ class Store:
                         skip_table=skip_table,
                         row_count=rows,
                         resolve_state=self._measure_resolve(con, table, colmap, rows),
+                        canonical_table=(
+                            CANONICAL_TABLE if CANONICAL_TABLE in tables else None
+                        ),
                     )
                     return self.bound
                 failures.append(f"{path.name}: no table carries {list(POINTS_SIGNATURE)}")
@@ -339,7 +354,7 @@ class Store:
 
     def _build_where(self, *, metric=None, entity=None, geography=None, year_from=None,
                      year_to=None, data_class=None, status=None,
-                     require_metric_code=False):
+                     require_metric_code=False, canonical_only=True):
         """Build the WHERE clause shared by search() and summarise().
 
         Extracted so the two cannot drift: a summary that counted a different population
@@ -409,19 +424,34 @@ class Store:
                 where.append(f"COALESCE(CAST({src} AS VARCHAR), '') NOT ILIKE ?")
                 params.append(f"{excluded}%")
 
-        return where, params, applied, ignored
+        # Count each document once. Reported separately from `not_applicable`, which is
+        # about filters the CALLER asked for; this is the store's own condition.
+        dedup = "unavailable"
+        if canonical_only:
+            if self.bound.canonical_table and cm.has("source"):
+                src = cm.quoted("source")
+                where.append(
+                    f'EXISTS (SELECT 1 FROM "{self.bound.canonical_table}" dc '
+                    f"WHERE dc.source_file = {src} AND dc.is_canonical)"
+                )
+                dedup = "applied"
+        else:
+            dedup = "off (caller asked for every copy)"
+
+        return where, params, applied, ignored, dedup
 
     def search(self, *, metric=None, entity=None, geography=None, year_from=None,
                year_to=None, data_class=None, status=None, limit=25,
-               require_metric_code=False):
+               require_metric_code=False, canonical_only=True):
         """Parameterised read-only structured query. Returns (records, echoed_filters).
         Every filter is optional; a filter on an ABSENT concept is not silently dropped,
         it is reported in echoed_filters['not_applicable'] so the caller can see what was
         and was not applied and correct it in plain language."""
-        where, params, applied, ignored = self._build_where(
+        where, params, applied, ignored, dedup = self._build_where(
             metric=metric, entity=entity, geography=geography,
             year_from=year_from, year_to=year_to, data_class=data_class,
             status=status, require_metric_code=require_metric_code,
+            canonical_only=canonical_only,
         )
 
         cols, names = self._select(self._RETURN_CONCEPTS)
@@ -445,6 +475,7 @@ class Store:
             "not_applicable": sorted(set(ignored)),
             "limit": int(limit),
             "returned": len(records),
+            "deduplication": dedup,
         }
         # Say which layer refused the quarantine, rather than leaving it silent. The
         # exclusion now happens in the WHERE clause, so the post-filter above normally
@@ -466,7 +497,7 @@ class Store:
 
     def summarise(self, *, metric=None, entity=None, geography=None, year_from=None,
                   year_to=None, data_class=None, status=None,
-                  require_metric_code=False, top=15):
+                  require_metric_code=False, canonical_only=True, top=15):
         """What the store HOLDS for a filter, as grouped counts, without returning rows.
 
         The problem this solves. Asked a question it cannot answer from 25 records with
@@ -482,10 +513,11 @@ class Store:
         computed in ONE pass over a materialised subset rather than one scan per facet.
         Returns (summary, echoed_filters)."""
         cm = self.bound.columns
-        where, params, applied, ignored = self._build_where(
+        where, params, applied, ignored, dedup = self._build_where(
             metric=metric, entity=entity, geography=geography,
             year_from=year_from, year_to=year_to, data_class=data_class,
             status=status, require_metric_code=require_metric_code,
+            canonical_only=canonical_only,
         )
 
         # An unfiltered summary would materialise the entire store. Refuse rather than
@@ -494,7 +526,8 @@ class Store:
             return (
                 {"note": "a summary needs at least one filter; summarising the whole "
                          "store would scan every row and answer no question."},
-                {"understood_as": applied, "not_applicable": sorted(set(ignored))},
+                {"understood_as": applied, "not_applicable": sorted(set(ignored)),
+                 "deduplication": dedup},
             )
 
         facets = [c for c in self._SUMMARY_FACETS if cm.has(c)]
@@ -503,7 +536,8 @@ class Store:
             return (
                 {"note": "the bound store carries none of the concepts a summary groups "
                          f"by: {list(self._SUMMARY_FACETS)} or source."},
-                {"understood_as": applied, "not_applicable": sorted(set(ignored))},
+                {"understood_as": applied, "not_applicable": sorted(set(ignored)),
+                 "deduplication": dedup},
             )
 
         select_bits = [f'{cm.quoted(c)} AS "{c}"' for c in facets]
@@ -572,7 +606,8 @@ class Store:
                 f"is incomplete and conflates totals, rates and factors; figures from this "
                 f"scope are not yet validated."
             )
-        echoed = {"understood_as": applied, "not_applicable": sorted(set(ignored))}
+        echoed = {"understood_as": applied, "not_applicable": sorted(set(ignored)),
+                  "deduplication": dedup}
         return summary, echoed
 
     def get_point(self, record_id):
