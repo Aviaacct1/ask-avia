@@ -231,6 +231,32 @@ def sheet_noun_unambiguous_sql() -> str:
     return f"({counts}) = 1"
 
 
+def connect_store(path: str, read_only: bool = True) -> duckdb.DuckDBPyConnection:
+    """Open the store, or refuse.
+
+    duckdb.connect() in write mode CREATES an empty database when the file is
+    absent. Run on the wrong machine, this script therefore manufactured an
+    empty full_v2.duckdb on the Dev PC on 15 Aug and then reported that
+    ask_points did not exist, which reads exactly like a store that has been
+    lost. Fail loudly instead."""
+    if not os.path.exists(path):
+        raise SystemExit(
+            f"\nNo store at {path}\n"
+            "Refusing to run: DuckDB would create an empty database here.\n"
+            "This script runs on the WORKSTATION (Donatello). Check the prompt\n"
+            "reads [Donatello]: before you run it.\n"
+        )
+    con = duckdb.connect(path, read_only=read_only)
+    tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+    if "ask_points" not in tables:
+        con.close()
+        raise SystemExit(
+            f"\n{path} holds no ask_points table, so it is not the Library.\n"
+            f"Tables found: {sorted(tables) or 'none, the file is empty'}\n"
+        )
+    return con
+
+
 def canonical_clause(con: duckdb.DuckDBPyConnection, alias: str = "") -> str:
     """Uncorrelated semi-join. NOT an EXISTS: a correlated outer reference binds
     to the inner table, so the filter reports itself applied and does nothing.
@@ -370,7 +396,7 @@ def main() -> int:
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(args.store, read_only=not args.build)
+    con = connect_store(args.store, read_only=not args.build)
 
     canon = "" if args.no_canonical else canonical_clause(con)
     canon_p = "" if args.no_canonical else canonical_clause(con, "p.")

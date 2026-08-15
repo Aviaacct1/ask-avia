@@ -48,7 +48,17 @@ def main() -> int:
     ap.add_argument("--entity", default="NCL")
     args = ap.parse_args()
 
+    if not os.path.exists(args.store):
+        raise SystemExit(
+            f"\nNo store at {args.store}\n"
+            "This runs on the WORKSTATION (Donatello). Check the prompt reads\n"
+            "[Donatello]: before you run it.\n"
+        )
     con = duckdb.connect(args.store, read_only=True)
+    held = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+    for needed in ("ask_points", "context_tag", "ask_points_v2"):
+        if needed not in held:
+            raise SystemExit(f"\n{args.store} has no {needed}. Tables: {sorted(held)}\n")
     canon = (
         ' AND "source_file" IN '
         "(SELECT source_file FROM doc_canonical WHERE is_canonical)"
