@@ -364,6 +364,7 @@ def main() -> int:
     ap.add_argument("--all", action="store_true", help="whole store, not one entity")
     ap.add_argument("--build", action="store_true", help="write the table and view")
     ap.add_argument("--no-canonical", action="store_true", help="include duplicate copies")
+    ap.add_argument("--report", action="store_true", help="full breakdown after a store-wide build")
     ap.add_argument("--out", default=r"E:\Avia\Extract\diag")
     args = ap.parse_args()
 
@@ -381,8 +382,13 @@ def main() -> int:
     log: list[str] = []
 
     def say(s: str = "") -> None:
-        print(s)
+        print(s, flush=True)
         log.append(s)
+
+    def flush() -> None:
+        """Write the report as we go. A long run that dies at the end should
+        still leave a record of what it did."""
+        (out / "metric_tags_report.txt").write_text("\n".join(log), encoding="utf-8")
 
     say(f"store     : {args.store}")
     say(f"scope     : {'whole store' if args.all else 'entity_id=' + args.entity}")
@@ -397,7 +403,25 @@ def main() -> int:
         say(f"context_tag written: {n:,} distinct (context, sheet) rows")
         con.execute(VIEW_SQL)
         say("view ask_points_v2 created")
+        # CHECKPOINT, or the write lives only in the write-ahead log. An
+        # uncommitted table is still visible to a read-only connection, which
+        # replays the log, so it looks built; the next read-write open discards
+        # the incomplete transaction and it is gone. That happened on 15 Aug.
+        con.execute("CHECKPOINT")
+        n2 = con.execute("SELECT count(*) FROM context_tag").fetchone()[0]
+        say(f"checkpointed: {n2:,} rows durable on disk")
+        flush()
         points, tagsrc, pwhere = "ask_points", "context_tag", where_p
+        if args.all and not args.report:
+            # The report queries carry no entity filter, so store-wide they
+            # join 722m points to the tag map and group six ways. That is what
+            # ran all night while the build itself had long since finished.
+            say()
+            say("build complete. Report skipped store-wide: run verify_tags.py,")
+            say("or re-run with --report if the full breakdown is wanted.")
+            (out / "metric_tags_report.txt").write_text("\n".join(log), encoding="utf-8")
+            con.close()
+            return 0
     elif args.all:
         # Store-wide: materialise only the tag map, which is small. The scope
         # itself is 722m points and must not be copied into a temp table.
